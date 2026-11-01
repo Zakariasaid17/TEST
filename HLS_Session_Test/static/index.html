@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HLS Session Test</title>
+  <script defer src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
+  <style>
+    :root { color-scheme: dark; --bg:#0b0d12; --panel:#161c28; --border:#2d3544; --muted:#a9b5c8; --text:#edf2fa; --blue:#3b82f6; }
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,Arial,sans-serif;line-height:1.5}
+    main{max-width:920px;padding:28px 18px 50px;margin:auto}
+    header{margin-bottom:22px}h1{font-size:clamp(23px,5vw,34px);line-height:1.2;margin:0 0 10px}h2{font-size:17px;margin:0 0 12px}
+    p{color:var(--muted);margin:0 0 12px;font-size:14px}
+    .card{border:1px solid var(--border);border-radius:14px;background:var(--panel);padding:20px;margin-bottom:18px}
+    form{display:flex;gap:10px}input{background:#0d111a;color:#fff;border:1px solid #465166;border-radius:8px;padding:13px;font-size:15px;flex:1;min-width:0}
+    button{background:var(--blue);color:white;border:0;border-radius:8px;padding:12px 18px;cursor:pointer;font-size:14px;font-weight:650}
+    button:hover{background:#2563eb}button:disabled{opacity:.55;cursor:not-allowed}
+    .outline{background:transparent;border:1px solid #50627b;color:#d8e5fd}
+    .meta{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+    .metric{background:#0e1420;border-radius:8px;padding:10px;min-width:0}
+    .metric label{display:block;color:var(--muted);font-size:12px}.metric strong{font-size:13px;word-break:break-all;font-weight:600}
+    video{width:100%;aspect-ratio:16/9;background:#000;border-radius:9px;display:block}
+    .hint{font-size:12px;color:var(--muted);margin-top:10px}
+    .status{color:#93c5fd;font-weight:600;font-size:14px;min-height:23px}
+    #events{font-size:12px;line-height:1.6;color:#a1acc0;max-height:160px;overflow:auto;padding:10px;background:#0e1420;border-radius:8px}
+    #events p{font-size:12px;margin:0 0 5px}
+    .topline{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+    @media(max-width:650px){form{flex-direction:column}.meta{grid-template-columns:1fr}.card{padding:16px}}
+  </style>
+</head>
+<body><main>
+  <header><h1>HLS Session Test</h1><p>One isolated browser session per device. Paste a video webpage URL to detect session-specific HLS requests.</p></header>
+  <section class="card">
+    <form id="form">
+      <input id="url" type="url" required placeholder="https://example.com/watch" autocomplete="off" />
+      <button id="start" type="submit">Start Test</button>
+    </form>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:12px;flex-wrap:wrap">
+      <button id="demo" class="outline" type="button">Try built-in sample</button>
+      <button id="stop" class="outline" type="button" disabled>Stop</button>
+    </div>
+    <p class="hint">The source opens in an isolated Chromium session on the server—not in a visible iframe. Known ad hosts and popup pages are filtered. No bypass of video authentication or DRM.</p>
+  </section>
+  <section class="card">
+    <div class="topline"><h2>Detected video player</h2><span id="status" class="status">Not started</span></div>
+    <video id="video" controls playsinline autoplay muted></video>
+    <p id="playerStatus" class="hint">Waiting for HLS URL. Auto-play begins muted; unmute in player controls.</p>
+    <p class="hint">An HLS URL may not work in your browser if it requires server cookies, is IP-locked, forbids CORS, has expired, or uses DRM.</p>
+  </section>
+  <section class="card">
+    <h2>Session diagnostics</h2>
+    <div class="meta">
+      <div class="metric"><label>Test session</label><strong id="sid">—</strong></div>
+      <div class="metric"><label>HLS playlists observed</label><strong id="found">0</strong></div>
+      <div class="metric"><label>Stream URL fingerprint</label><strong id="fingerprint">—</strong></div>
+      <div class="metric"><label>Token parameter fingerprint</label><strong id="tokenFingerprint">—</strong></div>
+      <div class="metric"><label>Token-like parameter detected</label><strong id="hasToken">—</strong></div>
+      <div class="metric"><label>Blocked popups / ad requests / redirects</label><strong id="blocked">0 / 0 / 0</strong></div>
+    </div>
+    <p class="hint">Compare the token fingerprints on two different devices. A changed fingerprint indicates different token-like query parameters, but does not establish that playback is transferable.</p>
+    <h2 style="margin-top:20px">Test events</h2>
+    <div id="events" aria-live="polite"><p>No events yet.</p></div>
+  </section>
+</main>
+<script>
+  const $ = id => document.getElementById(id);
+  let sessionId = null, es = null, hls = null;
+  let playbackStarted = false;
+  function message(s){const p = document.createElement('p');p.textContent = new Date().toLocaleTimeString() + ' — ' + s;const box=$('events');if (box.textContent==='No events yet.')box.textContent='';box.prepend(p);}
+  function stat(s){$('status').textContent=s;message(s);}
+  async function cleanup(){
+    if(es){es.close();es=null;}
+    if(hls){hls.destroy();hls=null;}
+    $('video').pause();$('video').removeAttribute('src');$('video').load();
+    if(sessionId){try{await fetch('/api/tests/'+encodeURIComponent(sessionId),{method:'DELETE'});}catch(e){}}
+    sessionId=null; $('stop').disabled=true; $('start').disabled=false;
+  }
+  function loadVideo(url){
+    if(playbackStarted)return;
+    playbackStarted=true;
+    const v=$('video');
+    $('playerStatus').textContent='Trying detected HLS stream directly…';
+    if(v.canPlayType('application/vnd.apple.mpegurl')){
+      v.src=url;
+      v.play().catch(()=>{$('playerStatus').textContent='Click Play to start (autoplay restriction).';});
+    }else if(window.Hls && Hls.isSupported()){
+      hls = new Hls({enableWorker:true});
+      hls.loadSource(url);
+      hls.attachMedia(v);
+      hls.on(Hls.Events.MANIFEST_PARSED,()=>v.play().catch(()=>{$('playerStatus').textContent='Click Play to start.';}));
+      hls.on(Hls.Events.ERROR,(_,data)=>{
+        if(data.fatal){ $('playerStatus').textContent='Playback error: '+data.details+' (possibly CORS/token/cookies/IP/DRM)'; message('HLS.js: '+data.details); }
+      });
+    }else{
+      $('playerStatus').textContent='HLS.js could not load. Check connection to jsDelivr, or use Safari.';
+    }
+    v.onplaying=()=>{$('playerStatus').textContent='Video playing. Audio starts muted; use player controls to unmute.';message('Video playback confirmed');};
+    v.onerror=()=>{$('playerStatus').textContent='Browser video playback failed (possibly CORS, expired token or authorization).';};
+  }
+  async function runTest(url){
+    await cleanup();
+    playbackStarted=false;
+    $('sid').textContent='—';$('found').textContent='0';$('fingerprint').textContent='—';$('tokenFingerprint').textContent='—';$('hasToken').textContent='—';$('blocked').textContent='0 / 0 / 0';$('events').textContent='';
+    $('start').disabled=true;
+    $('status').textContent='Starting…';
+    try{
+      const response=await fetch('/api/tests',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
+      const data=await response.json();
+      if(!response.ok)throw new Error(data.detail || 'Could not start test');
+      sessionId=data.id;
+      $('sid').textContent=sessionId.slice(0,9)+'…'; $('stop').disabled=false;
+      es=new EventSource('/api/tests/'+encodeURIComponent(sessionId)+'/events');
+      es.addEventListener('status',e=>stat(JSON.parse(e.data).status));
+      es.addEventListener('notice',e=>message(JSON.parse(e.data).message));
+      es.addEventListener('error',e=>{if(e.data){message(JSON.parse(e.data).message||'Detection failed');}else{message('Connection to test server interrupted');}});
+      es.addEventListener('filters',e=>{const d=JSON.parse(e.data);$('blocked').textContent=[d.popups,d.ads,d.redirects].join(' / ');});
+      es.addEventListener('candidate',e=>{
+        const d=JSON.parse(e.data), c=d.candidate;
+        $('found').textContent=d.count;
+        $('fingerprint').textContent=c.urlFingerprint;
+        $('tokenFingerprint').textContent=c.tokenFingerprint||'(no recognized token parameter)';
+        $('hasToken').textContent=c.tokenPresent?'Yes':(c.queryPresent?'Query exists, name not recognized':'No');
+        message('Detected HLS at '+c.host+c.path+' (credentials hidden)');
+        loadVideo(d.url);
+      });
+      es.addEventListener('complete',e=>message('Inspection complete: '+JSON.parse(e.data).candidates+' HLS candidate(s).'));
+    }catch(error){
+      $('status').textContent='Error';message(error.message);
+      $('start').disabled=false;
+    }
+  }
+  $('form').addEventListener('submit',ev=>{ev.preventDefault();runTest($('url').value.trim());});
+  $('demo').addEventListener('click',async()=>{
+    try {
+      const conf=await (await fetch('/api/config')).json();
+      $('url').value=conf.mockUrl;runTest(conf.mockUrl);
+    } catch(error) { message('Cannot determine demo URL: '+error.message); }
+  });
+  $('stop').addEventListener('click',cleanup);
+</script>
+</body></html>
