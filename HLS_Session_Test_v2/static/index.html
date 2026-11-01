@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HLS Session Test</title>
+  <script defer src="https://cdn.jsdelivr.net/npm/hls.js@1/dist/hls.min.js"></script>
+  <style>
+    :root { color-scheme: dark; --bg:#0b0d12; --panel:#161c28; --border:#2d3544; --muted:#a9b5c8; --text:#edf2fa; --blue:#3b82f6; }
+    *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font-family:Inter,system-ui,Arial,sans-serif;line-height:1.5}
+    main{max-width:920px;padding:28px 18px 50px;margin:auto}
+    header{margin-bottom:22px}h1{font-size:clamp(23px,5vw,34px);line-height:1.2;margin:0 0 10px}h2{font-size:17px;margin:0 0 12px}
+    p{color:var(--muted);margin:0 0 12px;font-size:14px}
+    .card{border:1px solid var(--border);border-radius:14px;background:var(--panel);padding:20px;margin-bottom:18px}
+    form{display:flex;gap:10px}input{background:#0d111a;color:#fff;border:1px solid #465166;border-radius:8px;padding:13px;font-size:15px;flex:1;min-width:0}
+    button{background:var(--blue);color:white;border:0;border-radius:8px;padding:12px 18px;cursor:pointer;font-size:14px;font-weight:650}
+    button:hover{background:#2563eb}button:disabled{opacity:.55;cursor:not-allowed}
+    .outline{background:transparent;border:1px solid #50627b;color:#d8e5fd}
+    .meta{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+    .metric{background:#0e1420;border-radius:8px;padding:10px;min-width:0}
+    .metric label{display:block;color:var(--muted);font-size:12px}.metric strong{font-size:13px;word-break:break-all;font-weight:600}
+    video{width:100%;aspect-ratio:16/9;background:#000;border-radius:9px;display:block}
+    .hint{font-size:12px;color:var(--muted);margin-top:10px}
+    .status{color:#93c5fd;font-weight:600;font-size:14px;min-height:23px}
+    #events{font-size:12px;line-height:1.6;color:#a1acc0;max-height:160px;overflow:auto;padding:10px;background:#0e1420;border-radius:8px}
+    #events p{font-size:12px;margin:0 0 5px}
+    .topline{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px;flex-wrap:wrap}
+    .candidates{display:flex;flex-wrap:wrap;gap:8px}.candidate{display:flex;flex-direction:column;gap:4px;text-align:left;background:#18283c;border:1px solid #455b7c;min-width:180px;max-width:100%}.candidate.active{border-color:#93c5fd}.candidate small{font-size:11px;color:#c9d5e5;font-weight:400;word-break:break-all}
+
+    @media(max-width:650px){form{flex-direction:column}.meta{grid-template-columns:1fr}.card{padding:16px}}
+  </style>
+</head>
+<body><main>
+  <header><h1>HLS Session Test</h1><p>One isolated browser session per device. Paste a video webpage URL to detect session-specific HLS requests.</p></header>
+  <section class="card">
+    <form id="form">
+      <input id="url" type="url" required placeholder="https://example.com/watch" autocomplete="off" />
+      <button id="start" type="submit">Start Test</button>
+    </form>
+    <div style="display:flex;gap:8px;align-items:center;margin-top:12px;flex-wrap:wrap">
+      <button id="demo" class="outline" type="button">Try built-in sample</button>
+      <button id="stop" class="outline" type="button" disabled>Stop</button>
+    </div>
+    <p class="hint">The source opens in an isolated Chromium session on the server—not in a visible iframe. Known ad hosts and popup pages are filtered. No bypass of video authentication or DRM.</p>
+  </section>
+  <section class="card">
+    <div class="topline"><h2>Detected video player</h2><span id="status" class="status">Not started</span></div>
+    <video id="video" controls playsinline autoplay muted></video>
+    <p id="playerStatus" class="hint">Waiting for HLS URL. Auto-play begins muted; unmute in player controls.</p>
+    <p class="hint">The app will try other detected playlists automatically if one fails. CORS, device/IP-bound tokens and DRM are not bypassed.</p>
+    <h2 style="margin-top:18px">Detected playlists</h2>
+    <div id="candidates" class="candidates"><p>No playlists detected yet.</p></div>
+  </section>
+  <section class="card">
+    <h2>Session diagnostics</h2>
+    <div class="meta">
+      <div class="metric"><label>Test session</label><strong id="sid">—</strong></div>
+      <div class="metric"><label>HLS playlists observed</label><strong id="found">0</strong></div>
+      <div class="metric"><label>Stream URL fingerprint</label><strong id="fingerprint">—</strong></div>
+      <div class="metric"><label>Token parameter fingerprint</label><strong id="tokenFingerprint">—</strong></div>
+      <div class="metric"><label>Token-like parameter detected</label><strong id="hasToken">—</strong></div>
+      <div class="metric"><label>Blocked popups / ad requests / redirects</label><strong id="blocked">0 / 0 / 0</strong></div>
+    </div>
+    <p class="hint">Compare the same candidate's token fingerprints on two different devices. The host/path labels help you choose the corresponding playlist.</p>
+    <h2 style="margin-top:20px">Test events</h2>
+    <button id="copyDiagnostics" class="outline" type="button" style="margin-bottom:10px">Copy safe diagnostics</button>
+    <div id="events" aria-live="polite"><p>No events yet.</p></div>
+  </section>
+</main>
+<script>
+  const $ = id => document.getElementById(id);
+  let sessionId=null, es=null, hls=null, currentIndex=-1, watchdog=null;
+  let candidates=[], tried=new Set(), inspectionDone=false, isPlaying=false;
+  let errorHistory=[];
+  function message(s){
+    const p=document.createElement('p');p.textContent=new Date().toLocaleTimeString()+' — '+s;
+    const box=$('events');if(box.textContent==='No events yet.')box.textContent='';box.prepend(p);
+  }
+  function stat(s){$('status').textContent=s;message(s);}
+  function stopWatch(){if(watchdog){clearTimeout(watchdog);watchdog=null;}}
+  function resetMedia(){
+    stopWatch();
+    if(hls){hls.destroy();hls=null;}
+    const v=$('video');v.pause();v.onplaying=null;v.onerror=null;
+    v.removeAttribute('src');v.load();
+  }
+  async function cleanup(){
+    if(es){es.close();es=null;}
+    resetMedia();
+    if(sessionId){try{await fetch('/api/tests/'+encodeURIComponent(sessionId),{method:'DELETE'});}catch(e){}}
+    sessionId=null;$('stop').disabled=true;$('start').disabled=false;
+  }
+  function safePlaybackUrl(url){
+    // The mock source runs inside server-side Chromium at 127.0.0.1.
+    // A phone/remote browser cannot use that hostname. Map ONLY the bundled
+    // sample's media path to the public origin serving this test page.
+    const u=new URL(url);
+    if(u.hostname==='127.0.0.1' && /^\/mock\/video\//.test(u.pathname)){
+      return location.origin+u.pathname+u.search;
+    }
+    return url;
+  }
+  function formatError(data){
+    const bits=[data.details||data.type||'Unknown HLS error'];
+    if(data.response && typeof data.response.code==='number')bits.push('HTTP '+data.response.code);
+    return bits.join(' — ');
+  }
+  function showCandidates(){
+    const box=$('candidates');box.textContent='';
+    if(!candidates.length){const p=document.createElement('p');p.textContent='No playlists detected yet.';box.appendChild(p);return;}
+    candidates.forEach((d,i)=>{
+      const c=d.candidate;
+      const button=document.createElement('button');button.type='button';
+      button.className='candidate'+(i===currentIndex?' active':'');
+      const t=document.createElement('strong');t.textContent='Candidate '+(i+1);
+      const sub=document.createElement('small');sub.textContent=(c.host||'unknown')+(c.path||'');
+      const meta=document.createElement('small');meta.textContent='URL #'+c.urlFingerprint+' | token #'+(c.tokenFingerprint||'none');
+      button.append(t,sub,meta);button.addEventListener('click',()=>attempt(i,true));box.appendChild(button);
+    });
+  }
+  function markCandidate(d){
+    const c=d.candidate;
+    $('fingerprint').textContent=c.urlFingerprint;
+    $('tokenFingerprint').textContent=c.tokenFingerprint||'(no recognized token parameter)';
+    $('hasToken').textContent=c.tokenPresent?'Yes':(c.queryPresent?'Query exists, name not recognized':'No');
+  }
+  function tryNext(){
+    if(isPlaying)return;
+    const index=candidates.findIndex((_,i)=>!tried.has(i));
+    if(index!==-1){attempt(index,false);return;}
+    currentIndex=-1;showCandidates();
+    $('playerStatus').textContent=inspectionDone
+      ? 'All detected candidates failed. Check the diagnostic errors below. Try a different source or compare with the built-in sample.'
+      : 'This playlist failed. Waiting for any other HLS candidates…';
+  }
+  function fail(reason, index){
+    if(index!==currentIndex || isPlaying)return;
+    const info='Candidate '+(index+1)+': '+reason;
+    errorHistory.push(info);message(info);stopWatch();resetMedia();
+    $('playerStatus').textContent=info;
+    currentIndex=-1;tryNext();
+  }
+  function attempt(index,manual){
+    if(index<0||index>=candidates.length)return;
+    resetMedia();isPlaying=false;currentIndex=index;tried.add(index);showCandidates();
+    const d=candidates[index];markCandidate(d);
+    const v=$('video');const url=safePlaybackUrl(d.url);
+    $('playerStatus').textContent='Trying candidate '+(index+1)+' of '+candidates.length+'…';
+    if(location.protocol==='https:' && url.startsWith('http:')){
+      fail('Mixed content: this HTTPS test page cannot play an HTTP media URL.',index);return;
+    }
+    v.onplaying=()=>{
+      if(currentIndex!==index)return;
+      stopWatch();isPlaying=true;
+      $('playerStatus').textContent='Video playing (candidate '+(index+1)+'). Unmute using the player controls.';
+      message('Playback CONFIRMED for candidate '+(index+1));
+    };
+    v.onerror=()=>fail('Browser video playback error (CORS, network, codec, authorization or media format).',index);
+    watchdog=setTimeout(()=>fail('No video started within 25 seconds (stream may be blocked or unavailable).',index),25000);
+    try{
+      if(v.canPlayType('application/vnd.apple.mpegurl')){
+        v.src=url;v.play().catch(e=>{
+          if(e.name==='NotAllowedError'){
+            $('playerStatus').textContent='Autoplay blocked: press Play on the video.';
+            stopWatch();
+          }else fail('Browser refused playback: '+e.message,index);
+        });
+      }else if(window.Hls && Hls.isSupported()){
+        hls=new Hls({enableWorker:true});
+        hls.on(Hls.Events.ERROR,(_,data)=>{
+          if(currentIndex===index && data.fatal)fail(formatError(data),index);
+        });
+        hls.on(Hls.Events.MANIFEST_PARSED,()=>{
+          if(currentIndex===index)v.play().catch(e=>{
+            if(e.name==='NotAllowedError'){
+              $('playerStatus').textContent='Autoplay blocked: press Play on the video.';
+              stopWatch();
+            }else fail('Playback refused: '+e.message,index);
+          });
+        });
+        hls.loadSource(url);hls.attachMedia(v);
+      }else{
+        fail('HLS.js not loaded or this browser does not support HLS.',index);
+      }
+    }catch(e){fail('Player initialization: '+e.message,index);}
+  }
+  async function runTest(url){
+    await cleanup();
+    candidates=[];tried=new Set();currentIndex=-1;inspectionDone=false;isPlaying=false;errorHistory=[];
+    $('sid').textContent='—';$('found').textContent='0';$('fingerprint').textContent='—';
+    $('tokenFingerprint').textContent='—';$('hasToken').textContent='—';$('blocked').textContent='0 / 0 / 0';
+    $('events').textContent='';showCandidates();$('start').disabled=true;$('status').textContent='Starting…';
+    $('playerStatus').textContent='Waiting for HLS request…';
+    try{
+      const response=await fetch('/api/tests',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({url})});
+      const data=await response.json();if(!response.ok)throw Error(data.detail||'Could not start test');
+      sessionId=data.id;$('sid').textContent=sessionId.slice(0,9)+'…';$('stop').disabled=false;
+      es=new EventSource('/api/tests/'+encodeURIComponent(sessionId)+'/events');
+      es.addEventListener('status',e=>stat(JSON.parse(e.data).status));
+      es.addEventListener('notice',e=>message(JSON.parse(e.data).message));
+      es.addEventListener('error',e=>{if(e.data){message(JSON.parse(e.data).message||'Detection failed');}else{message('Connection to test server interrupted');}});
+      es.addEventListener('filters',e=>{const d=JSON.parse(e.data);$('blocked').textContent=[d.popups,d.ads,d.redirects].join(' / ');});
+      es.addEventListener('candidate',e=>{
+        const d=JSON.parse(e.data);
+        candidates.push(d);$('found').textContent=candidates.length;showCandidates();
+        message('Detected HLS #'+candidates.length+' at '+d.candidate.host+d.candidate.path+' (credentials hidden)');
+        if(currentIndex===-1&&!isPlaying)tryNext();
+      });
+      es.addEventListener('complete',e=>{
+        inspectionDone=true;message('Inspection complete: '+JSON.parse(e.data).candidates+' HLS candidate(s).');
+        if(!isPlaying&&currentIndex===-1)tryNext();
+      });
+    }catch(e){$('status').textContent='Error';message(e.message);$('start').disabled=false;}
+  }
+  $('form').addEventListener('submit',ev=>{ev.preventDefault();runTest($('url').value.trim());});
+  $('demo').addEventListener('click',async()=>{
+    try{const conf=await(await fetch('/api/config')).json();$('url').value=conf.mockUrl;runTest(conf.mockUrl);}
+    catch(e){message('Cannot determine demo URL: '+e.message);}
+  });
+  $('stop').addEventListener('click',cleanup);
+  $('copyDiagnostics').addEventListener('click',async()=>{
+    const out=[
+      'HLS Session Test diagnostics (credentials excluded)',
+      'Source host: '+(function(){try{return new URL($('url').value).hostname;}catch(e){return 'unknown';}})(),
+      'Test session: '+$('sid').textContent,
+      'Player status: '+$('playerStatus').textContent,
+      'HLS candidate count: '+candidates.length,
+      'Blocked popups / ads / redirects: '+$('blocked').textContent,
+      ...candidates.map((d,i)=>'Candidate '+(i+1)+': '+d.candidate.host+d.candidate.path+' | URL fingerprint '+d.candidate.urlFingerprint+' | token fingerprint '+(d.candidate.tokenFingerprint||'none')),
+      'Errors: '+(errorHistory.join(' | ')||'none')
+    ].join('\n');
+    try{await navigator.clipboard.writeText(out);message('Safe diagnostics copied. Paste them into your support chat.');}
+    catch(e){message('Clipboard unavailable. Copy the visible event messages instead.');}
+  });
+</script>
+</body></html>
